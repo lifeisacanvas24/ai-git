@@ -218,4 +218,3 @@ def ai_git_commit():
 # Alias for easy access
 if __name__ == "__main__":
     ai_git_commit()
-
