@@ -127,34 +127,31 @@ def prompt_commit_message(suggestions):
             # Display available commit message suggestions
             for i, message in enumerate(suggestions, 1):
                 print(f"{i}. {message}")
-
             print(f"{len(suggestions) + 1}. Enter custom message")
 
             # Prompt for user input
             choice = input("Choose a commit message (or enter number): ").strip()
             print(f"User input received: '{choice}'")
 
-            # Check if the input is a valid number
             if choice.isdigit():
                 index = int(choice)
                 if 1 <= index <= len(suggestions):
-                    selected_message = suggestions[index - 1]
-                    print(f"Selected commit message: '{selected_message}'")
-                    return selected_message
+                    return suggestions[index - 1]
 
-            # If the input is not valid, prompt for custom message
+            elif choice == "":
+                print("No input received. Please enter a valid choice.")
+                continue  # Retry until valid input
+
             custom_message = input("Enter your custom commit message: ").strip()
-            if custom_message:  # Ensure the custom message is not empty
-                print(f"Custom commit message entered: '{custom_message}'")
+            if custom_message:
                 return custom_message
             else:
-                print("Custom message cannot be empty. Please try again.")
+                print("Custom message cannot be empty.")
+                continue
 
-        except EOFError:
-            print("No input available. Using a meaningful default commit message.")
-            return "No changes to commit."
         except Exception as e:
-            print(f"Unexpected error: {e}. Please enter a valid input.")
+            print(f"Error: {e}. Defaulting to fallback message.")
+            return "Fallback: No input provided."
 
 # Commit changes
 def commit_changes(commit_message):
