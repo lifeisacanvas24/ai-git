@@ -1,0 +1,7 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ai-git-commit
+        name: AI Git Commit
+        entry: python3 /Users/aravindkumar/.starship/plugins/ai-git/ai-git-commit.py
+        language: python_venv
