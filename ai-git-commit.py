@@ -1,271 +1,162 @@
-#!/usr/bin/env python3
-
-import json
+import logging
 import os
 import subprocess
-import sys
-from datetime import datetime
+import time
+from typing import List, Optional
 
-import requests
+import openai
 
-# File paths
-# Added STARTSHIP_STATUS_LOG as part of logging.
-STARSHIP_LOGS = os.path.expanduser("~/.starship/logs")
-CACHE_FILE = os.path.join(STARSHIP_LOGS, "ai-commit-cache")
-FEEDBACK_LOG = os.path.join(STARSHIP_LOGS, "ai-commit-feedback.log")
-LAST_RESPONSE_LOG = os.path.join(STARSHIP_LOGS, "last-openai-response.log")
-REQUEST_LOG = os.path.join(STARSHIP_LOGS, "openai-request-payload.log")
-STARTSHIP_STATUS_LOG = os.path.join(STARSHIP_LOGS, "ai-commit-status-starship.log")
-API_KEY_PATH = os.path.expanduser("~/.ssh/openai-api-key")
+# Configure logging
+LOG_FOLDER = '/path/to/log/folder'
+TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
+LOG_FILE = os.path.join(LOG_FOLDER, f"log_{TIMESTAMP}.txt")
 
-# Available OpenAI models
-MODEL_DESCRIPTIONS = {
-    "gpt-3.5-turbo": "Fastest and most cost-effective model, good for most everyday tasks",
-    "gpt-4": "More capable model, better for complex tasks and reasoning",
-    "gpt-4-turbo": "Most advanced model, best for specialized and demanding applications",
-}
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
-DEFAULT_MODEL = "gpt-3.5-turbo"
-MODEL = DEFAULT_MODEL
+def get_staged_files() -> List[str]:
+    try:
+        result = subprocess.run(['git', 'diff', '--cached', '--name-only'],
+                               capture_output=True, text=True, check=True)
+        return result.stdout.strip().split('\n')
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error getting staged files: {e}")
+        raise
 
+def get_staged_changes_for_file(file_path: str) -> str:
+    try:
+        result = subprocess.run(['git', 'diff', '--cached', file_path],
+                               capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error getting changes for file {file_path}: {e}")
+        return ""
 
-# Extract comments from the diff
-def extract_comments_from_diff(diff_output):
-    lines = diff_output.split("\n")
-    comments = [
-        line
-        for line in lines
-        if line.strip().startswith(("#", "//", "/*", "*/", "<!--", "--"))
+def get_commit_message_suggestions(prompt: str) -> List[str]:
+    # Initialize the OpenAI API client
+    api_key = os.environ.get('OPENAI_API_KEY')
+    if not api_key:
+        raise EnvironmentError("OPENAI_API_KEY is not set in the environment variables")
+
+    openai.api_key = api_key
+
+    # Prepare the chat completion request
+    messages = [
+        {
+            "role": "user",
+            "content": prompt,
+        }
     ]
-    if comments:
-        print(f"Comments found: {' '.join(comments)}")
-    else:
-        print("No comments found in the diff.")
-    return " ".join(comments)
 
-
-# Get the diff of staged changes
-def get_diff():
-    return subprocess.check_output(["git", "diff", "--staged"]).decode("utf-8")
-
-
-# Verify if inside a Git repository
-def is_git_repo():
+    # Generate the completion
     try:
-        subprocess.check_output(["git", "rev-parse", "--is-inside-work-tree"])
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-# Check if there are staged changes
-def has_staged_changes():
-    try:
-        subprocess.check_call(["git", "diff", "--staged", "--quiet"])
-        return False
-    except subprocess.CalledProcessError:
-        return True
-
-
-# Load the OpenAI API key
-def load_api_key():
-    try:
-        with open(API_KEY_PATH, "r") as file:
-            return file.read().strip()
-    except FileNotFoundError:
-        print(f"Error: OpenAI API key not found at {API_KEY_PATH}.")
-        return None
-
-
-# Send request to OpenAI API
-def send_request_to_openai(prompt, model):
-    openai_api_key = load_api_key()
-    if not openai_api_key:
-        return None
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {openai_api_key}",
-    }
-    data = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "max_tokens": 200,
-    }
-
-    response = requests.post(
-        "https://api.openai.com/v1/chat/completions", headers=headers, json=data
-    )
-
-    if response.status_code == 200:
-        return response.json()
-    else:
-        print(f"Error: OpenAI API request failed with status {response.status_code}")
-        return None
-
-
-# Log request payload
-def log_request(prompt, model):
-    with open(REQUEST_LOG, "w") as log_file:
-        log_file.write(f"Model: {model}\nPrompt: {prompt}\n")
-
-
-# Log OpenAI response
-def log_response(response):
-    with open(LAST_RESPONSE_LOG, "w") as log_file:
-        log_file.write(json.dumps(response, indent=4))
-
-
-# Get commit message suggestions
-def get_commit_messages(diff_output, model):
-    prompt = f"Generate 3 commit messages for the following git diff:\n{diff_output}\nProvide only the messages."
-    log_request(prompt, model)
-
-    response = send_request_to_openai(prompt, model)
-    if response:
-        log_response(response)
-        commit_messages = (
-            response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+            max_tokens_per_prompt=2048,
+            temperature=0.7,
+            top_p=1,
+            n=5,
         )
-        return commit_messages.strip().split("\n")
-    else:
-        # More meaningful default messages based on the error
-        if not diff_output.strip():
-            return ["No changes to commit.", "Nothing modified.", "No staged changes."]
-        else:
-            return [
-                "Failed to generate commit messages. Please try again.",
-                "Unable to fetch AI suggestions.",
-            ]
 
+        # Extract the suggested messages
+        suggestions = []
+        for item in response['choices']:
+            suggestions.append(item['delta'].strip())
 
-# Prompt user to select or customize a commit message
+        return suggestions
 
+    except openai.OpenAIAPIException as e:
+        logging.error(f"API request failed: {e}")
+        return []  # Return an empty list if the API request fails
 
-def prompt_commit_message(suggestions):
-    # Display available commit message suggestions
-    print("Prompting for commit message...")
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        return []  # Return an empty list if any unexpected error occurs
 
-    # Set stdout to /dev/tty for user-friendly output
-    sys.stdout = open("/dev/tty", "w")
-
-    # Display the commit message suggestions
-    for i, message in enumerate(suggestions, 1):
-        print(f"{i}. {message}")
-    print(f"{len(suggestions) + 1}. Enter custom message")
-
-    sys.stdin = open("/dev/tty", "r")
+def prompt_user_for_input(suggestions: List[str]) -> Optional[str]:
+    print("\nAvailable commit message suggestions:")
+    for i, suggestion in enumerate(suggestions):
+        print(f"{i + 1}. {suggestion}")
 
     while True:
+        choice = input("Enter the number of your preferred suggestion, or 'c' for custom: ")
+        if choice.lower() == 'c':
+            return None
         try:
-            # Prompt for user input
-            user_input = input("Choose a commit message (or enter number): ").strip()
-            print(f"User input received: '{user_input}'")
-
-            if user_input.isdigit():
-                index = int(user_input)
-                if 1 <= index <= len(suggestions):
-                    return suggestions[index - 1]
-                elif index == len(suggestions) + 1:
-                    # Prompt for a custom message if user selects the custom message option
-                    custom_message = input("Enter your custom commit message: ").strip()
-                    if custom_message:
-                        return custom_message
-                    else:
-                        print("Custom message cannot be empty.")
-                        continue
-                else:
-                    print(
-                        f"Invalid selection. Please choose a number between 1 and {len(suggestions) + 1}."
-                    )
-                    continue
-
-            elif user_input == "":
-                print("No input received. Please enter a valid choice.")
-                continue  # Retry until valid input
-
+            num = int(choice)
+            if 1 <= num <= len(suggestions):
+                return suggestions[num - 1]
             else:
-                # Fallback case for custom messages if input is not a number
-                custom_message = input("Enter your custom commit message: ").strip()
-                if custom_message:
-                    return custom_message
-                else:
-                    print("Custom message cannot be empty.")
-                    continue
+                print("Invalid selection. Please choose a valid option.")
+        except ValueError:
+            print("Invalid input. Please enter a number or 'c'.")
 
-        except Exception as e:
-            print(f"Error: {e}. Defaulting to fallback message.")
-            return "Fallback: No input provided."
+def commit_file(file_path: str, message: str) -> None:
+    """Commit a single file with the given message."""
+    try:
+        subprocess.run(['git', 'commit', '-m', f"{file_path}: {message}"], check=True)
+        logging.info(f"Successfully committed file: {file_path}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to commit file {file_path}: {e}")
 
-
-# Commit changes
-def commit_changes(commit_message):
-    subprocess.run(["git", "commit", "-m", commit_message])
-
-
-# Cache commit message
-def cache_commit_message(diff_output, commit_message):
-    with open(CACHE_FILE, "a") as cache:
-        cache.write(f"{diff_output}|{commit_message}\n")
-
-
-# Function to analyze feedback log
-def analyze_feedback():
-    if not os.path.exists(FEEDBACK_LOG):
-        print(f"No feedback log found at {FEEDBACK_LOG}.")
-        return
-
-    with open(FEEDBACK_LOG, "r") as feedback_file:
-        feedback_data = feedback_file.read()
-
-    prompt = f"Analyze the following feedback data:\n{feedback_data}\nProvide 3-5 suggestions to improve AI-generated commit messages."
-    suggestions = send_request_to_openai(prompt, MODEL)
-    if suggestions:
-        print("Suggestions for improvement:")
-        print(suggestions)
-
-
-# Get commit status for Starship
-def get_ai_commit_status():
-    if os.path.exists(STARTSHIP_STATUS_LOG):
-        with open(STARTSHIP_STATUS_LOG, "r") as file:
-            last_used = int(file.read().strip())
-        time_diff = int(datetime.now().timestamp()) - last_used
-
-        if time_diff < 3600:
-            return "🤖 Ready"
-        elif time_diff < 86400:
-            return f"🤖 {time_diff // 3600}h"
-        else:
-            return f"🤖 {time_diff // 86400}d"
+def main():
+    # Check if triggered by auto-commit
+    if 'GIT_COMMIT_SCRIPT_TRIGGERED' in os.environ:
+        logging.info("Triggered by auto-commit feature")
     else:
-        return "🤖 Not used"
+        logging.info("Manual execution")
 
+    try:
+        staged_files = get_staged_files()
+        if not staged_files:
+            logging.warning("No staged files found. Exiting.")
+            return
 
-# Main function to execute the AI git commit process
-def ai_git_commit():
-    if not is_git_repo():
-        print("Error: Not inside a Git repository.")
-        return
+        logging.info(f"Found {len(staged_files)} staged files")
 
-    if not has_staged_changes():
-        print("No staged changes to commit.")
-        return
+        print("\nStaged files:")
+        for i, file in enumerate(staged_files):
+            print(f"{i + 1}. {file}")
 
-    diff_output = get_diff()
-    suggestions = get_commit_messages(diff_output, MODEL)
+        selected_files = []
+        custom_messages = {}
 
-    if not suggestions:
-        print("No commit message suggestions received from OpenAI.")
-        return
+        for i, file in enumerate(staged_files, start=1):
+            print(f"\nFile {i}: {file}")
+            response = input("Do you want to commit this file? (y/n): ")
+            if response.lower() == 'y':
+                selected_files.append(i)
 
-    commit_message = prompt_commit_message(suggestions)
-    commit_changes(commit_message)
-    cache_commit_message(diff_output, commit_message)
+                prompt = f"""Here's a summary of the changes for {file}:
 
+{get_staged_changes_for_file(file)}
 
-# Alias for easy access
+Please provide a brief description of the changes."""
+
+                suggestions = get_commit_message_suggestions(prompt)
+                selected_message = prompt_user_for_input(suggestions)
+
+                if selected_message is None:
+                    selected_message = input(f"Please provide a custom commit message for {file}: ")
+
+                custom_messages[file] = selected_message
+
+        if not selected_files:
+            logging.warning("No files selected for commit. Exiting.")
+            return
+
+        for file_index in selected_files:
+            file = staged_files[file_index - 1]
+            commit_file(file, custom_messages[file])
+            logging.info(f"Successfully committed file: {file}")
+
+        logging.info("All selected files committed successfully.")
+
+    except Exception as e:
+        logging.exception(f"An unexpected error occurred: {str(e)}")
+        print(f"An unexpected error occurred: {str(e)}")
+
 if __name__ == "__main__":
-    ai_git_commit()
+    main()
 
